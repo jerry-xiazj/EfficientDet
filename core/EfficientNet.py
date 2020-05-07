@@ -23,7 +23,7 @@ import collections
 import functools
 import math
 
-import utils
+import core.utils as utils
 
 from absl import logging
 import tensorflow as tf
@@ -42,7 +42,6 @@ GlobalParams = collections.namedtuple('GlobalParams', [
     'min_depth',
     'survival_prob',
     'relu_fn',
-    'batch_norm',
     'use_se',
     'clip_projection_output',
     'blocks_args',
@@ -97,7 +96,6 @@ class MBConvBlock(tf.keras.layers.Layer):
         self._block_args = block_args
         self._batch_norm_momentum = global_params.batch_norm_momentum
         self._batch_norm_epsilon = global_params.batch_norm_epsilon
-        self._batch_norm = global_params.batch_norm
         self._data_format = global_params.data_format
         if self._data_format == 'channels_first':
             self._channel_axis = 1
@@ -158,7 +156,7 @@ class MBConvBlock(tf.keras.layers.Layer):
             padding='same',
             use_bias=False
         )
-        self._bn = tf.keras.layers.BatchNormalization(
+        self._bn0 = tf.keras.layers.BatchNormalization(
             axis=self._channel_axis,
             momentum=self._batch_norm_momentum,
             epsilon=self._batch_norm_epsilon
@@ -170,6 +168,11 @@ class MBConvBlock(tf.keras.layers.Layer):
             strides=self._block_args.strides,
             padding='same',
             use_bias=False
+        )
+        self._bn1 = tf.keras.layers.BatchNormalization(
+            axis=self._channel_axis,
+            momentum=self._batch_norm_momentum,
+            epsilon=self._batch_norm_epsilon
         )
 
         if self._has_se:
@@ -198,6 +201,11 @@ class MBConvBlock(tf.keras.layers.Layer):
             strides=[1, 1],
             padding='same',
             use_bias=False
+        )
+        self._bn2 = tf.keras.layers.BatchNormalization(
+            axis=self._channel_axis,
+            momentum=self._batch_norm_momentum,
+            epsilon=self._batch_norm_epsilon
         )
 
     def _call_se(self, input_tensor):
@@ -231,23 +239,24 @@ class MBConvBlock(tf.keras.layers.Layer):
 
         if self._block_args.fused_conv:
             # If use fused mbconv, skip expansion and use regular conv.
-            x = self._relu_fn(self._bn(self._fused_conv(x), training=training))
+            x = self._relu_fn(self._bn1(self._fused_conv(x), training=training))
             logging.info('Conv2D shape: %s', x.shape)
         else:
             # Otherwise, first apply expansion and then apply depthwise conv.
             if self._block_args.expand_ratio != 1:
-                x = self._relu_fn(self._bn(self._expand_conv(x), training=training))
+                x = self._relu_fn(self._bn0(self._expand_conv(x), training=training))
                 logging.info('Expand shape: %s', x.shape)
 
-            x = self._relu_fn(self._bn(self._depthwise_conv(x), training=training))
+            x = self._relu_fn(self._bn1(self._depthwise_conv(x), training=training))
             logging.info('DWConv shape: %s', x.shape)
 
         if self._has_se:
-            x = self._call_se(x)
+            with tf.name_scope('se'):
+                x = self._call_se(x)
 
         self.endpoints = {'expansion_output': x}
 
-        x = self._bn(self._project_conv(x), training=training)
+        x = self._bn2(self._project_conv(x), training=training)
         # Add identity so that quantization-aware training can insert quantization
         # ops correctly.
         x = tf.identity(x)
@@ -279,7 +288,7 @@ class MBConvBlockWithoutDepthwise(MBConvBlock):
                 padding='same',
                 use_bias=False
             )
-        self._bn = tf.keras.layers.BatchNormalization(
+        self._bn0 = tf.keras.layers.BatchNormalization(
             axis=self._channel_axis,
             momentum=self._batch_norm_momentum,
             epsilon=self._batch_norm_epsilon
@@ -293,6 +302,11 @@ class MBConvBlockWithoutDepthwise(MBConvBlock):
             strides=self._block_args.strides,
             padding='same',
             use_bias=False
+        )
+        self._bn1 = tf.keras.layers.BatchNormalization(
+            axis=self._channel_axis,
+            momentum=self._batch_norm_momentum,
+            epsilon=self._batch_norm_epsilon
         )
 
     def call(self, inputs, training=True, survival_prob=None):
@@ -308,14 +322,14 @@ class MBConvBlockWithoutDepthwise(MBConvBlock):
         """
         logging.info('Block %s  input shape: %s', self.name, inputs.shape)
         if self._block_args.expand_ratio != 1:
-            x = self._relu_fn(self._bn(self._expand_conv(inputs), training=training))
+            x = self._relu_fn(self._bn0(self._expand_conv(inputs), training=training))
         else:
             x = inputs
         logging.info('Expand shape: %s', x.shape)
 
         self.endpoints = {'expansion_output': x}
 
-        x = self._bn(self._project_conv(x), training=training)
+        x = self._bn1(self._project_conv(x), training=training)
         # Add identity so that quantization-aware training can insert quantization
         # ops correctly.
         x = tf.identity(x)
@@ -358,7 +372,6 @@ class Model(tf.keras.Model):
         self._relu_fn = global_params.relu_fn or tf.nn.swish
         self._batch_norm_momentum = global_params.batch_norm_momentum
         self._batch_norm_epsilon = global_params.batch_norm_epsilon
-        self._batch_norm = global_params.batch_norm
         self._data_format = global_params.data_format
         if self._data_format == 'channels_first':
             self._channel_axis = 1
@@ -397,7 +410,7 @@ class Model(tf.keras.Model):
             strides=[2, 2],
             padding='same',
             use_bias=False)
-        self._bn = tf.keras.layers.BatchNormalization(
+        self._bn0 = tf.keras.layers.BatchNormalization(
             axis=self._channel_axis,
             momentum=self._batch_norm_momentum,
             epsilon=self._batch_norm_epsilon
@@ -439,6 +452,11 @@ class Model(tf.keras.Model):
             padding='same',
             use_bias=False
         )
+        self._bn1 = tf.keras.layers.BatchNormalization(
+            axis=self._channel_axis,
+            momentum=self._batch_norm_momentum,
+            epsilon=self._batch_norm_epsilon
+        )
 
         self._avg_pooling = tf.keras.layers.GlobalAveragePooling2D(
             data_format=self._global_params.data_format)
@@ -478,7 +496,8 @@ class Model(tf.keras.Model):
         reduction_idx = 0
 
         # Calls Stem layers
-        outputs = self._relu_fn(self._bn(self._conv_stem(inputs), training=training))
+        with tf.name_scope('stem'):
+            outputs = self._relu_fn(self._bn0(self._conv_stem(inputs), training=training))
         logging.info('Built stem layers with output shape: %s', outputs.shape)
         self.endpoints['stem'] = outputs
 
@@ -491,26 +510,28 @@ class Model(tf.keras.Model):
                 is_reduction = True
                 reduction_idx += 1
 
-            survival_prob = self._global_params.survival_prob
-            if survival_prob:
-                drop_rate = 1.0 - survival_prob
-                survival_prob = 1.0 - drop_rate * idx / len(self._blocks)
-                logging.info('block_%s survival_prob: %s', idx, survival_prob)
-            outputs = block.call(outputs, training=training, survival_prob=survival_prob)
-            self.endpoints['block_%s' % idx] = outputs
-            if is_reduction:
-                self.endpoints['reduction_%s' % reduction_idx] = outputs
-            if block.endpoints:
-                for k, v in block.endpoints:
-                    self.endpoints['block_%s/%s' % (idx, k)] = v
-                    if is_reduction:
-                        self.endpoints['reduction_%s/%s' % (reduction_idx, k)] = v
+            with tf.name_scope('blocks_%s' % idx):
+                survival_prob = self._global_params.survival_prob
+                if survival_prob:
+                    drop_rate = 1.0 - survival_prob
+                    survival_prob = 1.0 - drop_rate * idx / len(self._blocks)
+                    logging.info('block_%s survival_prob: %s', idx, survival_prob)
+                outputs = block.call(outputs, training=training, survival_prob=survival_prob)
+                self.endpoints['block_%s' % idx] = outputs
+                if is_reduction:
+                    self.endpoints['reduction_%s' % reduction_idx] = outputs
+                if block.endpoints:
+                    for k, v in block.endpoints.items():
+                        self.endpoints['block_%s/%s' % (idx, k)] = v
+                        if is_reduction:
+                            self.endpoints['reduction_%s/%s' % (reduction_idx, k)] = v
         self.endpoints['features'] = outputs
 
         if not features_only:
             # Calls final layers and returns logits.
-            outputs = self._relu_fn(self._bn(self._conv_head(outputs), training=training))
-            self.endpoints['head_1x1'] = outputs
+            with tf.name_scope('head'):
+                outputs = self._relu_fn(self._bn1(self._conv_head(outputs), training=training))
+                self.endpoints['head_1x1'] = outputs
 
             outputs = self._avg_pooling(outputs)
             self.endpoints['pooled_features'] = outputs
