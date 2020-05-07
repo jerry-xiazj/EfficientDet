@@ -476,7 +476,7 @@ class Model(tf.keras.Model):
     def call(self,
              inputs,
              training=True,
-             features_only=None,
+             features_only=False,
              pooled_features_only=False):
         """Implementation of call().
 
