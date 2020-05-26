@@ -148,8 +148,12 @@ def bifpn_dynamic_config(min_level, max_level, weight_method):
     num_levels = max_level - min_level + 1
     node_ids = {min_level + i: [i] for i in range(num_levels)}
 
-    level_last_id = lambda level: node_ids[level][-1]
-    level_all_ids = lambda level: node_ids[level]
+    def level_last_id(level):
+        return node_ids[level][-1]
+
+    def level_all_ids(level):
+        return node_ids[level]
+
     id_cnt = itertools.count(num_levels)
 
     p.nodes = []
@@ -268,10 +272,10 @@ def build_bifpn_layer(feats, feat_sizes, config):
             num_output_connections.append(0)
 
     output_feats = {}
-    for l in range(p.min_level, p.max_level + 1):
+    for level in range(p.min_level, p.max_level + 1):
         for i, fnode in enumerate(reversed(fpn_config.nodes)):
-            if fnode['feat_level'] == l:
-                output_feats[l] = feats[-1 - i]
+            if fnode['feat_level'] == level:
+                output_feats[level] = feats[-1 - i]
                 break
     return output_feats
 

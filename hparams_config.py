@@ -198,7 +198,6 @@ def default_detection_configs():
     h.poly_lr_power = 0.9
     h.clip_gradients_norm = 10.0
     h.num_epochs = 300
-    h.data_format = 'channels_last'
 
     # classification loss
     h.alpha = 0.25

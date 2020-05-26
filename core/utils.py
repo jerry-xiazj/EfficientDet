@@ -1,5 +1,32 @@
 import tensorflow as tf
 from typing import Text, Tuple, Union
+import math
+
+
+def round_filters(filters, global_params):
+    """Round number of filters based on depth multiplier."""
+    multiplier = global_params.width_coefficient
+    divisor = global_params.depth_divisor
+    min_depth = global_params.min_depth
+    if not multiplier:
+        return filters
+
+    filters *= multiplier
+    min_depth = min_depth or divisor
+    new_filters = max(min_depth,
+                      int(filters + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_filters < 0.9 * filters:
+        new_filters += divisor
+    return int(new_filters)
+
+
+def round_repeats(repeats, global_params):
+    """Round number of filters based on depth multiplier."""
+    multiplier = global_params.depth_coefficient
+    if not multiplier:
+        return repeats
+    return int(math.ceil(multiplier * repeats))
 
 
 def drop_connect(inputs, is_training, survival_prob):
