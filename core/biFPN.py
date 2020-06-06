@@ -1,7 +1,7 @@
 import utils
 import functools
 import itertools
-import hparams_config
+from hparams import Config
 from absl import logging
 import tensorflow as tf
 
@@ -11,24 +11,14 @@ def resample_feature_map(feat,
                          target_height,
                          target_width,
                          target_num_channels,
-                         apply_bn=False,
-                         is_training=None,
-                         conv_after_downsample=False,
-                         use_native_resize_op=False,
-                         pooling_type=None,
-                         data_format='channels_last'):
+                         is_training=True):
     """Resample input feature map to have target number of channels and size."""
-    if data_format == 'channels_first':
-        _, num_channels, height, width = feat.get_shape().as_list()
-    else:
-        _, height, width, num_channels = feat.get_shape().as_list()
+    _, height, width, num_channels = feat.get_shape().as_list()
 
     if height is None or width is None or num_channels is None:
         raise ValueError(
             'shape[1] or shape[2] or shape[3] of feat is None (shape:{}).'.
             format(feat.shape))
-    if apply_bn and is_training is None:
-        raise ValueError('If BN is applied, need to provide is_training')
 
     def _maybe_apply_1x1(feat):
         """Apply 1x1 conv to change layer width if necessary."""
@@ -36,63 +26,31 @@ def resample_feature_map(feat,
             feat = tf.keras.layers.Conv2D(feat,
                                           filters=target_num_channels,
                                           kernel_size=(1, 1),
-                                          padding='same',
-                                          data_format=data_format)
-            if apply_bn:
-                feat = utils.batch_norm_act(feat,
-                                            is_training_bn=is_training,
-                                            act_type=None,
-                                            data_format=data_format,
-                                            name='bn')
+                                          padding='same')
+            feat = utils.batch_norm_act(feat,
+                                        is_training_bn=is_training,
+                                        act_type=None,
+                                        name='bn')
         return feat
 
     with tf.variable_scope('resample_{}'.format(name)):
         # If conv_after_downsample is True, when downsampling, apply 1x1 after
         # downsampling for efficiency.
         if height > target_height and width > target_width:
-            if not conv_after_downsample:
-                feat = _maybe_apply_1x1(feat)
+            feat = _maybe_apply_1x1(feat)
             height_stride_size = int((height - 1) // target_height + 1)
             width_stride_size = int((width - 1) // target_width + 1)
-            if pooling_type == 'max' or pooling_type is None:
-                # Use max pooling in default.
-                feat = tf.keras.layers.MaxPooling2D(
-                    inputs=feat,
-                    pool_size=[height_stride_size + 1, width_stride_size + 1],
-                    strides=[height_stride_size, width_stride_size],
-                    padding='SAME',
-                    data_format=data_format)
-            elif pooling_type == 'avg':
-                feat = tf.keras.layers.AveragePooling2D(
-                    inputs=feat,
-                    pool_size=[height_stride_size + 1, width_stride_size + 1],
-                    strides=[height_stride_size, width_stride_size],
-                    padding='SAME',
-                    data_format=data_format)
-            else:
-                raise ValueError(
-                    'Unknown pooling type: {}'.format(pooling_type))
-            if conv_after_downsample:
-                feat = _maybe_apply_1x1(feat)
+            feat = tf.keras.layers.MaxPooling2D(
+                inputs=feat,
+                pool_size=[height_stride_size + 1, width_stride_size + 1],
+                strides=[height_stride_size, width_stride_size],
+                padding='SAME')
         elif height <= target_height and width <= target_width:
             feat = _maybe_apply_1x1(feat)
             if height < target_height or width < target_width:
-                height_scale = target_height // height
-                width_scale = target_width // width
-                if (use_native_resize_op or target_height % height != 0
-                        or target_width % width != 0):
-                    if data_format == 'channels_first':
-                        feat = tf.transpose(feat, [0, 2, 3, 1])
-                    feat = tf.image.resize(
-                        feat, [target_height, target_width],
-                        tf.image.ReszieMethod.NEAREST_NEIGHBOR)
-                    if data_format == 'channels_first':
-                        feat = tf.transpose(feat, [0, 3, 1, 2])
-                else:
-                    feat = nearest_upsampling(feat,
-                                              height_scale=height_scale,
-                                              width_scale=width_scale,
-                                              data_format=data_format)
+                feat = tf.image.resize(
+                    feat, [target_height, target_width],
+                    tf.image.ReszieMethod.NEAREST_NEIGHBOR)
         else:
             raise ValueError(
                 'Incompatible target feature map size: target_height: {},'
@@ -101,31 +59,10 @@ def resample_feature_map(feat,
     return feat
 
 
-def nearest_upsampling(data, height_scale, width_scale, data_format):
-    """Nearest neighbor upsampling implementation."""
-    with tf.name_scope('nearest_upsampling'):
-        # Use reshape to quickly upsample the input. The nearest pixel is selected
-        # implicitly via broadcasting.
-        if data_format == 'channels_first':
-            # Possibly faster for certain GPUs only.
-            bs, c, h, w = data.get_shape().as_list()
-            bs = -1 if bs is None else bs
-            data = tf.reshape(data, [bs, c, h, 1, w, 1]) * tf.ones(
-                [1, 1, 1, height_scale, 1, width_scale], dtype=data.dtype)
-            return tf.reshape(data, [bs, c, h * height_scale, w * width_scale])
-
-        # Normal format for CPU/TPU/GPU.
-        bs, h, w, c = data.get_shape().as_list()
-        bs = -1 if bs is None else bs
-        data = tf.reshape(data, [bs, h, 1, w, 1, c]) * tf.ones(
-            [1, 1, height_scale, 1, width_scale, 1], dtype=data.dtype)
-        return tf.reshape(data, [bs, h * height_scale, w * width_scale, c])
-
-
 def bifpn_dynamic_config(min_level, max_level, weight_method):
     """A dynamic bifpn config that can adapt to different min/max levels."""
-    p = hparams_config.Config()
-    p.weight_method = weight_method or 'fastattn'
+    config = Config()
+    config.weight_method = weight_method or 'fastattn'
 
     # Node id starts from the input features and monotonically increase whenever
     # a new node is added. Here is an example for level P3 - P7:
@@ -156,10 +93,10 @@ def bifpn_dynamic_config(min_level, max_level, weight_method):
 
     id_cnt = itertools.count(num_levels)
 
-    p.nodes = []
+    config.nodes = []
     for i in range(max_level - 1, min_level - 1, -1):
         # top-down path.
-        p.nodes.append({
+        config.nodes.append({
             'feat_level':
             i,
             'inputs_offsets': [level_last_id(i),
@@ -169,7 +106,7 @@ def bifpn_dynamic_config(min_level, max_level, weight_method):
 
     for i in range(min_level + 1, max_level + 1):
         # bottom-up path.
-        p.nodes.append({
+        config.nodes.append({
             'feat_level':
             i,
             'inputs_offsets':
@@ -177,16 +114,15 @@ def bifpn_dynamic_config(min_level, max_level, weight_method):
         })
         node_ids[i].append(next(id_cnt))
 
-    return p
+    return config
 
 
 def build_bifpn_layer(feats, feat_sizes, config):
     """Builds a feature pyramid given previous feature pyramid and config."""
-    p = config  # use p to denote the network config.
-    if p.fpn_config:
-        fpn_config = p.fpn_config
+    if config.fpn_config:
+        fpn_config = config.fpn_config
     else:
-        fpn_config = bifpn_dynamic_config(p.min_level, p.max_level, p.fpn_weight_method)
+        fpn_config = bifpn_dynamic_config(config.min_level, config.max_level, config.fpn_weight_method)
 
     num_output_connections = [0 for _ in feats]
     for i, fnode in enumerate(fpn_config.nodes):
@@ -203,12 +139,12 @@ def build_bifpn_layer(feats, feat_sizes, config):
                     '{}_{}_{}'.format(idx, input_offset, len(feats)),
                     new_node_height,
                     new_node_width,
-                    p.fpn_num_filters,
-                    p.apply_bn_for_resampling,
-                    p.is_training_bn,
-                    p.conv_after_downsample,
-                    p.use_native_resize_op,
-                    p.pooling_type,
+                    config.fpn_num_filters,
+                    config.apply_bn_for_resampling,
+                    config.is_training_bn,
+                    config.conv_after_downsample,
+                    config.use_native_resize_op,
+                    config.pooling_type,
                     data_format=config.data_format)
                 nodes.append(input_node)
 
@@ -242,10 +178,10 @@ def build_bifpn_layer(feats, feat_sizes, config):
                     fpn_config.weight_method))
 
             with tf.variable_scope('op_after_combine{}'.format(len(feats))):
-                if not p.conv_bn_act_pattern:
-                    new_node = utils.activation_fn(new_node, p.act_type)
+                if not config.conv_bn_act_pattern:
+                    new_node = utils.activation_fn(new_node, config.act_type)
 
-                if p.separable_conv:
+                if config.separable_conv:
                     conv_op = functools.partial(tf.keras.layers.SeparableConv2D,
                                                 depth_multiplier=1)
                 else:
@@ -253,26 +189,26 @@ def build_bifpn_layer(feats, feat_sizes, config):
 
                 new_node = conv_op(
                     new_node,
-                    filters=p.fpn_num_filters,
+                    filters=config.fpn_num_filters,
                     kernel_size=(3, 3),
                     padding='same',
-                    use_bias=True if not p.conv_bn_act_pattern else False,
+                    use_bias=True if not config.conv_bn_act_pattern else False,
                     data_format=config.data_format,
                     name='conv')
 
                 new_node = utils.batch_norm_act(
                     new_node,
-                    is_training_bn=p.is_training_bn,
-                    act_type=None if not p.conv_bn_act_pattern else p.act_type,
+                    is_training_bn=config.is_training_bn,
+                    act_type=None if not config.conv_bn_act_pattern else config.act_type,
                     data_format=config.data_format,
-                    use_tpu=p.use_tpu,
+                    use_tpu=config.use_tpu,
                     name='bn')
 
             feats.append(new_node)
             num_output_connections.append(0)
 
     output_feats = {}
-    for level in range(p.min_level, p.max_level + 1):
+    for level in range(config.min_level, config.max_level + 1):
         for i, fnode in enumerate(reversed(fpn_config.nodes)):
             if fnode['feat_level'] == level:
                 output_feats[level] = feats[-1 - i]
