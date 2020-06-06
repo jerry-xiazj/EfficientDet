@@ -82,7 +82,6 @@ CFG.pooling_type = None
 
 # version.
 CFG.fpn_name = None
-CFG.fpn_weight_method = None
 CFG.fpn_config = None
 
 # No stochastic depth in default.

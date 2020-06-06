@@ -65,7 +65,6 @@ def batch_norm_act(inputs,
                    is_training_bn: bool,
                    act_type: Union[Text, None],
                    init_zero: bool = False,
-                   data_format: Text = 'channels_last',
                    momentum: float = 0.99,
                    epsilon: float = 1e-3,
                    name: Text = None):
@@ -91,14 +90,8 @@ def batch_norm_act(inputs,
     else:
         gamma_initializer = tf.ones_initializer()
 
-    if data_format == 'channels_first':
-        axis = 1
-    else:
-        axis = 3
-
     inputs = tf.keras.layers.BatchNormalization(
         inputs=inputs,
-        axis=axis,
         momentum=momentum,
         epsilon=epsilon,
         center=True,
