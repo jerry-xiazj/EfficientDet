@@ -1,6 +1,7 @@
 import tensorflow as tf
 from typing import Text, Tuple, Union
 import math
+import numpy as np
 
 
 def round_filters(filters, global_params):

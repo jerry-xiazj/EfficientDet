@@ -176,7 +176,6 @@ class MBConvBlock(tf.keras.layers.Layer):
         logging.info('Block %s  input shape: %s', self.name, inputs.shape)
         x = inputs
 
-        # Otherwise, first apply expansion and then apply depthwise conv.
         if self._block_args.expand_ratio != 1:
             x = self._relu_fn(self._bn0(self._expand_conv(x), training=training))
             logging.info('Expand shape: %s', x.shape)

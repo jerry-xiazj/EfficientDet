@@ -2,6 +2,7 @@ import utils
 import itertools
 from hparams import Config
 from absl import logging
+import numpy as np
 import tensorflow as tf
 
 
@@ -197,7 +198,7 @@ def build_feature_network(features, config):
     config: a dict-like config, including all parameters.
 
     Returns:
-        A dict from levels to the feature maps processed after feature network.
+        {3:P3", 4:P4", 5:P5", 6:P6", 7:P7"}
     """
     feat_sizes = utils.get_feat_sizes(config.image_size, config.max_level)
     feats = []
@@ -233,3 +234,149 @@ def build_feature_network(features, config):
         ]
 
     return new_feats
+
+
+def class_net(images,
+              level,
+              num_classes,
+              num_anchors,
+              num_filters,
+              is_training,
+              act_type,
+              repeats=4,
+              survival_prob=None):
+    """Class prediction network."""
+
+    for i in range(repeats):
+        orig_images = images
+        images = tf.keras.layers.SeparableConv2D(
+            images,
+            num_filters,
+            kernel_size=3,
+            bias_initializer=tf.keras.initializers.zeros(),
+            activation=None,
+            padding='same',
+            name='class-%d' % i,
+            depth_multiplier=1,
+            pointwise_initializer=tf.keras.initializers.VarianceScaling(),
+            depthwise_initializer=tf.keras.initializers.VarianceScaling()
+        )
+        images = utils.batch_norm_act(
+            images,
+            is_training,
+            act_type=act_type,
+            init_zero=False,
+            name='class-%d-bn-%d' % (i, level))
+
+        if i > 0 and survival_prob:
+            images = utils.drop_connect(images, is_training, survival_prob)
+            images = images + orig_images
+
+    classes = tf.keras.layers.SeparableConv2D(
+            images,
+            num_classes * num_anchors,
+            kernel_size=3,
+            bias_initializer=tf.keras.initializers.Constant(-np.log((1 - 0.01) / 0.01)),
+            padding='same',
+            name='class-predict',
+            depth_multiplier=1,
+            pointwise_initializer=tf.keras.initializers.VarianceScaling(),
+            depthwise_initializer=tf.keras.initializers.VarianceScaling()
+        )
+    return classes
+
+
+def box_net(images,
+            level,
+            num_anchors,
+            num_filters,
+            is_training,
+            act_type,
+            repeats=4,
+            separable_conv=True,
+            survival_prob=None):
+    """Box regression network."""
+
+    for i in range(repeats):
+        orig_images = images
+        images = tf.keras.layers.SeparableConv2D(
+            images,
+            num_filters,
+            kernel_size=3,
+            activation=None,
+            bias_initializer=tf.zeros_initializer(),
+            padding='same',
+            name='box-%d' % i,
+            depth_multiplier=1,
+            pointwise_initializer=tf.keras.initializers.VarianceScaling(),
+            depthwise_initializer=tf.keras.initializers.VarianceScaling())
+        images = utils.batch_norm_act(
+            images,
+            is_training,
+            act_type=act_type,
+            init_zero=False,
+            name='box-%d-bn-%d' % (i, level))
+
+        if i > 0 and survival_prob:
+            images = utils.drop_connect(images, is_training, survival_prob)
+            images = images + orig_images
+
+    boxes = tf.keras.layers.SeparableConv2D(
+            images,
+            4 * num_anchors,
+            kernel_size=3,
+            bias_initializer=tf.zeros_initializer(),
+            padding='same',
+            name='box-predict',
+            depth_multiplier=1,
+            pointwise_initializer=tf.keras.initializers.VarianceScaling(),
+            depthwise_initializer=tf.keras.initializers.VarianceScaling()
+        )
+
+    return boxes
+
+
+def build_class_and_box_outputs(feats, config):
+    """Builds box net and class net.
+
+    Args:
+    feats: {3:P3", 4:P4", 5:P5", 6:P6", 7:P7"}
+    config: a dict-like config, including all parameters.
+
+    Returns:
+    A tuple (class_outputs, box_outputs) for class/box predictions.
+    """
+
+    class_outputs = {}
+    box_outputs = {}
+    num_anchors = len(config.aspect_ratios) * config.num_scales
+    cls_fsize = config.fpn_num_filters
+    for level in range(config.min_level, config.max_level + 1):
+        class_outputs[level] = class_net(
+            images=feats[level],
+            level=level,
+            num_classes=config.num_classes,
+            num_anchors=num_anchors,
+            num_filters=cls_fsize,
+            is_training=config.is_training_bn,
+            act_type=config.act_type,
+            repeats=config.box_class_repeats,
+            separable_conv=config.separable_conv,
+            survival_prob=config.survival_prob
+        )
+
+    box_fsize = config.fpn_num_filters
+    for level in range(config.min_level, config.max_level + 1):
+        box_outputs[level] = box_net(
+            images=feats[level],
+            level=level,
+            num_anchors=num_anchors,
+            num_filters=box_fsize,
+            is_training=config.is_training_bn,
+            act_type=config.act_type,
+            repeats=config.box_class_repeats,
+            separable_conv=config.separable_conv,
+            survival_prob=config.survival_prob
+        )
+
+    return class_outputs, box_outputs
